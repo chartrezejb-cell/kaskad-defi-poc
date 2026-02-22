@@ -75,7 +75,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
 
   useEffect(() => {
     const fetchPool = async () => {
-      if (!signer || FACTORY_ADDRESS === "0x0000000000000000000000000000000000000000") return;
+      if (!signer) return;
       setState(s => ({ ...s, isLoadingPool: true }));
       try {
         const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
