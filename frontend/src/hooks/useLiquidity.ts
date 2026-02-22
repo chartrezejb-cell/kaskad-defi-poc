@@ -6,6 +6,7 @@ import { ROUTER_ABI, FACTORY_ABI, PAIR_ABI, ERC20_ABI } from "../config/abis";
 const DEADLINE_MINUTES = 20;
 const SLIPPAGE_BPS = 50;
 const GAS_PRICE = ethers.utils.parseUnits("2000", "gwei");
+const GAS_LIMIT = 500000;
 
 function deadline() {
   return Math.floor(Date.now() / 1000) + DEADLINE_MINUTES * 60;
@@ -71,7 +72,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     t.address === "NATIVE" ? TOKENS.kaWIKAS.address : t.address;
 
   const isPoolEmpty = (poolInfo: PoolInfo | null) =>
-    !poolInfo || parseFloat(poolInfo.reserve0) === 0 || parseFloat(poolInfo.reserve1) === 0;
+    !poolInfo || parseFloat(poolInfo.totalSupply) === 0;
 
   useEffect(() => {
     const fetchPool = async () => {
@@ -133,15 +134,14 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     fetchPool();
   }, [state.tokenA, state.tokenB, signer, address]);
 
- // Auto-calculate tokenB based on pool ratio — skip if pool is empty
-useEffect(() => {
-  if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
-  const { reserve0, reserve1, totalSupply, myLpBalance } = state.poolInfo;
-  // Only auto-fill if pool has active liquidity from someone
-  if (parseFloat(totalSupply) === 0 || parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
-  const ratio = parseFloat(reserve1) / parseFloat(reserve0);
-  setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
-}, [state.amountA, state.pairExists, state.poolInfo]);
+  // Auto-calculate tokenB based on pool ratio — only when pool has active liquidity
+  useEffect(() => {
+    if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
+    const { reserve0, reserve1, totalSupply } = state.poolInfo;
+    if (parseFloat(totalSupply) === 0 || parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
+    const ratio = parseFloat(reserve1) / parseFloat(reserve0);
+    setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
+  }, [state.amountA, state.pairExists, state.poolInfo]);
 
   useEffect(() => {
     if (!state.poolInfo || !state.lpToRemove || parseFloat(state.lpToRemove) <= 0) return;
@@ -219,7 +219,7 @@ useEffect(() => {
     setState(s => ({ ...s, isApproving: true, error: null }));
     try {
       const c = new ethers.Contract(state.tokenA.address, ERC20_ABI, signer);
-      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
+      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT });
       await tx.wait();
       setState(s => ({ ...s, isApproving: false, needsApprovalA: false }));
     } catch (e: any) {
@@ -232,7 +232,7 @@ useEffect(() => {
     setState(s => ({ ...s, isApproving: true, error: null }));
     try {
       const c = new ethers.Contract(state.tokenB.address, ERC20_ABI, signer);
-      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
+      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT });
       await tx.wait();
       setState(s => ({ ...s, isApproving: false, needsApprovalB: false }));
     } catch (e: any) {
@@ -245,7 +245,7 @@ useEffect(() => {
     setState(s => ({ ...s, isApproving: true, error: null }));
     try {
       const pair = new ethers.Contract(state.poolInfo.pairAddress, PAIR_ABI, signer);
-      const tx = await pair.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
+      const tx = await pair.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT });
       await tx.wait();
       setState(s => ({ ...s, isApproving: false, needsLpApproval: false }));
     } catch (e: any) {
@@ -267,12 +267,11 @@ useEffect(() => {
       if (isNativeA) {
         const amtToken = ethers.utils.parseUnits(state.amountB, state.tokenB.decimals);
         const amtETH = ethers.utils.parseEther(state.amountA);
-        // On empty pool, set mins to 0 to allow free price setting
         const amtTokenMin = emptyPool ? ethers.BigNumber.from(0) : amtToken.mul(10000 - SLIPPAGE_BPS).div(10000);
         const amtETHMin = emptyPool ? ethers.BigNumber.from(0) : amtETH.mul(10000 - SLIPPAGE_BPS).div(10000);
         tx = await router.addLiquidityETH(
           state.tokenB.address, amtToken, amtTokenMin, amtETHMin, address, dl,
-          { value: amtETH, gasPrice: GAS_PRICE }
+          { value: amtETH, gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT }
         );
       } else if (isNativeB) {
         const amtToken = ethers.utils.parseUnits(state.amountA, state.tokenA.decimals);
@@ -281,7 +280,7 @@ useEffect(() => {
         const amtETHMin = emptyPool ? ethers.BigNumber.from(0) : amtETH.mul(10000 - SLIPPAGE_BPS).div(10000);
         tx = await router.addLiquidityETH(
           state.tokenA.address, amtToken, amtTokenMin, amtETHMin, address, dl,
-          { value: amtETH, gasPrice: GAS_PRICE }
+          { value: amtETH, gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT }
         );
       } else {
         const amtA = ethers.utils.parseUnits(state.amountA, state.tokenA.decimals);
@@ -291,7 +290,7 @@ useEffect(() => {
         tx = await router.addLiquidity(
           state.tokenA.address, state.tokenB.address,
           amtA, amtB, amtAMin, amtBMin, address, dl,
-          { gasPrice: GAS_PRICE }
+          { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT }
         );
       }
 
@@ -316,7 +315,6 @@ useEffect(() => {
       const isNativeA = state.tokenA.address === "NATIVE";
       const isNativeB = state.tokenB.address === "NATIVE";
 
-      // Use BigNumber math for min amounts — avoids float rounding reverts
       const pair = new ethers.Contract(state.poolInfo.pairAddress, PAIR_ABI, signer);
       const [res0, res1] = await pair.getReserves();
       const totalSupply: ethers.BigNumber = await pair.totalSupply();
@@ -337,13 +335,13 @@ useEffect(() => {
         const minToken = isNativeA ? minB : minA;
         tx = await router.removeLiquidityETH(
           tokenAddr, lpAmt, minToken, 0, address, dl,
-          { gasPrice: GAS_PRICE }
+          { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT }
         );
       } else {
         tx = await router.removeLiquidity(
           state.tokenA.address, state.tokenB.address,
           lpAmt, minA, minB, address, dl,
-          { gasPrice: GAS_PRICE }
+          { gasPrice: GAS_PRICE, gasLimit: GAS_LIMIT }
         );
       }
 
