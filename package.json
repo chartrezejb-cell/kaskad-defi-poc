@@ -1,0 +1,14 @@
+{
+  "name": "kaskad-defi-poc",
+  "version": "1.0.0",
+  "description": "DeFi Proof of Concept for Kaskad Protocol - Lending platform on Igra Galleon with automated QA testing",
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build",
+    "start": "cd frontend && npm start",
+    "install": "cd frontend && npm install"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  }
+}
