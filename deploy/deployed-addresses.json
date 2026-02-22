@@ -1,0 +1,10 @@
+{
+  "network": "IGRA Galleon Testnet",
+  "chainId": 38836,
+  "factory": "0x76bF18e7E36821e920FB8FbE99DeD541ffF5d7CF",
+  "router": "0x695e5db4906b184dF670c271db31374DB3e8308B",
+  "weth": "0x538be1843C72284672fC8852D3Dc7a269650F555",
+  "initCodeHash": "0x5307d586ca33c010656b24dd8e3101b0a7ff53e4aa0b245d7d8b5239cb5d1a74",
+  "deployedAt": "2026-02-21T15:17:35.497Z",
+  "deployer": "0xFcBD0dA4428c7697EA06b705Cea9F6A8858d6094"
+}
