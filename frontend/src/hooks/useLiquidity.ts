@@ -1,17 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { ethers } from "ethers";
-import {
-  Token,
-  TOKENS,
-  FACTORY_ADDRESS,
-  ROUTER_ADDRESS,
-  NATIVE_TOKEN,
-} from "../config/contracts";
+import { Token, TOKENS, FACTORY_ADDRESS, ROUTER_ADDRESS, NATIVE_TOKEN } from "../config/contracts";
 import { ROUTER_ABI, FACTORY_ABI, PAIR_ABI, ERC20_ABI } from "../config/abis";
-import { ZERO_ADDRESS } from "../config/constants";
 
-const SLIPPAGE_BPS = 50; // 0.50%
-const DEADLINE_MINUTES = 30;
+const DEADLINE_MINUTES = 20;
+const SLIPPAGE_BPS = 50;
+const GAS_PRICE = ethers.utils.parseUnits("2000", "gwei");
+
+function deadline() {
+  return Math.floor(Date.now() / 1000) + DEADLINE_MINUTES * 60;
+}
 
 export type PoolInfo = {
   pairAddress: string;
@@ -47,50 +45,9 @@ export type LiquidityState = {
   txHash: string | null;
 };
 
-type Erc20Meta = { decimals: number; symbol: string };
-
-function isPositiveNumberString(v: string) {
-  if (!v) return false;
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0;
-}
-
-function applySlippageDown(amount: ethers.BigNumber, bps: number) {
-  return amount.mul(10000 - bps).div(10000);
-}
-
-function extractRevertReason(err: any): string | null {
-  const candidates = [
-    err?.reason,
-    err?.error?.reason,
-    err?.error?.message,
-    err?.data?.message,
-    err?.message,
-  ].filter(Boolean);
-
-  const msg = String(candidates[0] || "");
-  if (!msg) return null;
-
-  if (msg.includes("execution reverted")) return msg;
-  return msg;
-}
-
 export function useLiquidity(signer: ethers.Signer | null, address: string | null) {
-  // Always prefer wrapped native on Igra to avoid router ETH paths
-  const WRAPPED_NATIVE = TOKENS.kaWIKAS;
-
-  const normalizeToken = useCallback(
-    (t: Token) => {
-      // If UI ever passes the native placeholder, we silently convert to wrapped native
-      if (t.address === "NATIVE") return WRAPPED_NATIVE;
-      return t;
-    },
-    [WRAPPED_NATIVE]
-  );
-
   const [state, setState] = useState<LiquidityState>({
-    // Default to wrapped native, not the native placeholder
-    tokenA: WRAPPED_NATIVE,
+    tokenA: NATIVE_TOKEN,
     tokenB: TOKENS.kaUSDC,
     amountA: "",
     amountB: "",
@@ -110,93 +67,57 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     txHash: null,
   });
 
-  // Cache ERC20 decimals/symbol from chain
-  const erc20MetaCache = useRef<Record<string, Erc20Meta>>({});
+  const getTokenAddr = (t: Token) =>
+    t.address === "NATIVE" ? TOKENS.kaWIKAS.address : t.address;
 
-  const getErc20Meta = useCallback(
-    async (tokenAddress: string): Promise<Erc20Meta> => {
-      const key = tokenAddress.toLowerCase();
-      const cached = erc20MetaCache.current[key];
-      if (cached) return cached;
+  const isPoolEmpty = (poolInfo: PoolInfo | null) =>
+    !poolInfo || parseFloat(poolInfo.reserve0) === 0 || parseFloat(poolInfo.reserve1) === 0;
 
-      if (!signer) {
-        const fallback = { decimals: 18, symbol: "ERC20" };
-        erc20MetaCache.current[key] = fallback;
-        return fallback;
-      }
-
-      const c = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
-      const [decimalsBn, symbol] = await Promise.all([c.decimals(), c.symbol()]);
-      const meta = { decimals: Number(decimalsBn), symbol: String(symbol) };
-      erc20MetaCache.current[key] = meta;
-      return meta;
-    },
-    [signer]
-  );
-
-  const getChainDeadline = useCallback(async () => {
-    if (!signer?.provider) {
-      const now = Math.floor(Date.now() / 1000);
-      return now + DEADLINE_MINUTES * 60;
-    }
-    const block = await signer.provider.getBlock("latest");
-    const chainNow = Number(block.timestamp);
-    return chainNow + DEADLINE_MINUTES * 60;
-  }, [signer]);
-
-  // Fetch pool info (ERC20 / ERC20 only)
   useEffect(() => {
     const fetchPool = async () => {
-      if (!signer || (FACTORY_ADDRESS as string) === ZERO_ADDRESS) return;
-
-      setState((s) => ({ ...s, isLoadingPool: true }));
-
+      if (!signer || FACTORY_ADDRESS === "0x0000000000000000000000000000000000000000") return;
+      setState(s => ({ ...s, isLoadingPool: true }));
       try {
         const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, signer);
-
-        const tA = normalizeToken(state.tokenA);
-        const tB = normalizeToken(state.tokenB);
-
-        const pairAddress = await factory.getPair(tA.address, tB.address);
+        const addrA = getTokenAddr(state.tokenA);
+        const addrB = getTokenAddr(state.tokenB);
+        const pairAddress = await factory.getPair(addrA, addrB);
         const pairExists = pairAddress !== ethers.constants.AddressZero;
 
         if (!pairExists) {
-          setState((s) => ({ ...s, pairExists: false, poolInfo: null, isLoadingPool: false }));
+          setState(s => ({ ...s, pairExists: false, poolInfo: null, isLoadingPool: false }));
           return;
         }
 
         const pair = new ethers.Contract(pairAddress, PAIR_ABI, signer);
         const [reserve0, reserve1] = await pair.getReserves();
         const token0: string = await pair.token0();
-        const token1: string = await pair.token1();
         const totalSupply: ethers.BigNumber = await pair.totalSupply();
-        const myLpBalance: ethers.BigNumber = address ? await pair.balanceOf(address) : ethers.BigNumber.from(0);
+        const myLpBalance: ethers.BigNumber = address
+          ? await pair.balanceOf(address)
+          : ethers.BigNumber.from(0);
 
-        const isAFirst = tA.address.toLowerCase() === token0.toLowerCase();
+        const isAFirst = addrA.toLowerCase() === token0.toLowerCase();
         const resA = isAFirst ? reserve0 : reserve1;
         const resB = isAFirst ? reserve1 : reserve0;
 
-        const decA = (await getErc20Meta(tA.address)).decimals;
-        const decB = (await getErc20Meta(tB.address)).decimals;
-
         const myShare = totalSupply.gt(0)
-          ? myLpBalance.mul(10000).div(totalSupply).toNumber() / 100
+          ? (myLpBalance.mul(10000).div(totalSupply).toNumber() / 100)
           : 0;
 
         const myTokenA = totalSupply.gt(0)
-          ? ethers.utils.formatUnits(myLpBalance.mul(resA).div(totalSupply), decA)
+          ? ethers.utils.formatUnits(myLpBalance.mul(resA).div(totalSupply), state.tokenA.decimals)
           : "0";
-
         const myTokenB = totalSupply.gt(0)
-          ? ethers.utils.formatUnits(myLpBalance.mul(resB).div(totalSupply), decB)
+          ? ethers.utils.formatUnits(myLpBalance.mul(resB).div(totalSupply), state.tokenB.decimals)
           : "0";
 
         const poolInfo: PoolInfo = {
           pairAddress,
           token0,
-          token1,
-          reserve0: ethers.utils.formatUnits(resA, decA),
-          reserve1: ethers.utils.formatUnits(resB, decB),
+          token1: addrA.toLowerCase() === token0.toLowerCase() ? addrB : addrA,
+          reserve0: ethers.utils.formatUnits(resA, state.tokenA.decimals),
+          reserve1: ethers.utils.formatUnits(resB, state.tokenB.decimals),
           totalSupply: ethers.utils.formatEther(totalSupply),
           myLpBalance: ethers.utils.formatEther(myLpBalance),
           myShare: myShare.toFixed(4),
@@ -204,329 +125,243 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
           myToken1: parseFloat(myTokenB).toFixed(6),
         };
 
-        setState((s) => ({ ...s, pairExists: true, poolInfo, isLoadingPool: false }));
-      } catch {
-        setState((s) => ({ ...s, isLoadingPool: false }));
+        setState(s => ({ ...s, pairExists: true, poolInfo, isLoadingPool: false }));
+      } catch (e) {
+        setState(s => ({ ...s, isLoadingPool: false }));
       }
     };
-
     fetchPool();
-  }, [state.tokenA, state.tokenB, signer, address, normalizeToken, getErc20Meta]);
+  }, [state.tokenA, state.tokenB, signer, address]);
 
-  // Auto quote amountB based on pool ratio
+  // Auto-calculate tokenB based on pool ratio — skip if pool is empty
   useEffect(() => {
-    if (!state.pairExists || !state.poolInfo || !isPositiveNumberString(state.amountA)) return;
+    if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
     const { reserve0, reserve1 } = state.poolInfo;
-    if (!isPositiveNumberString(reserve0)) return;
-
+    // Don't auto-calculate on empty pool — let user set initial price freely
+    if (parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
     const ratio = parseFloat(reserve1) / parseFloat(reserve0);
-    setState((s) => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
+    setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
   }, [state.amountA, state.pairExists, state.poolInfo]);
 
-  // Compute removal amounts
   useEffect(() => {
-    if (!state.poolInfo || !isPositiveNumberString(state.lpToRemove)) return;
+    if (!state.poolInfo || !state.lpToRemove || parseFloat(state.lpToRemove) <= 0) return;
     const { reserve0, reserve1, totalSupply } = state.poolInfo;
     const share = parseFloat(state.lpToRemove) / parseFloat(totalSupply);
-    setState((s) => ({
+    setState(s => ({
       ...s,
       removeAmountA: (parseFloat(reserve0) * share).toFixed(6),
       removeAmountB: (parseFloat(reserve1) * share).toFixed(6),
     }));
   }, [state.lpToRemove, state.poolInfo]);
 
-  // Check approvals for tokenA/tokenB (always ERC20 now)
   useEffect(() => {
     const check = async () => {
-      if (!signer || !address) return;
-      if (!isPositiveNumberString(state.amountA) || !isPositiveNumberString(state.amountB)) return;
-
-      const tA = normalizeToken(state.tokenA);
-      const tB = normalizeToken(state.tokenB);
-
-      try {
-        const metaA = await getErc20Meta(tA.address);
-        const cA = new ethers.Contract(tA.address, ERC20_ABI, signer);
-        const amtA = ethers.utils.parseUnits(state.amountA, metaA.decimals);
-        const allowanceA: ethers.BigNumber = await cA.allowance(address, ROUTER_ADDRESS);
-        setState((s) => ({ ...s, needsApprovalA: allowanceA.lt(amtA) }));
-      } catch {
-        /* ignore */
+      if (!signer || !address || !state.amountA || !state.amountB) return;
+      if (state.tokenA.address !== "NATIVE") {
+        try {
+          const c = new ethers.Contract(state.tokenA.address, ERC20_ABI, signer);
+          const amt = ethers.utils.parseUnits(state.amountA || "0", state.tokenA.decimals);
+          const allowance: ethers.BigNumber = await c.allowance(address, ROUTER_ADDRESS);
+          setState(s => ({ ...s, needsApprovalA: allowance.lt(amt) }));
+        } catch { /* ignore */ }
+      } else {
+        setState(s => ({ ...s, needsApprovalA: false }));
       }
-
-      try {
-        const metaB = await getErc20Meta(tB.address);
-        const cB = new ethers.Contract(tB.address, ERC20_ABI, signer);
-        const amtB = ethers.utils.parseUnits(state.amountB, metaB.decimals);
-        const allowanceB: ethers.BigNumber = await cB.allowance(address, ROUTER_ADDRESS);
-        setState((s) => ({ ...s, needsApprovalB: allowanceB.lt(amtB) }));
-      } catch {
-        /* ignore */
+      if (state.tokenB.address !== "NATIVE") {
+        try {
+          const c = new ethers.Contract(state.tokenB.address, ERC20_ABI, signer);
+          const amt = ethers.utils.parseUnits(state.amountB || "0", state.tokenB.decimals);
+          const allowance: ethers.BigNumber = await c.allowance(address, ROUTER_ADDRESS);
+          setState(s => ({ ...s, needsApprovalB: allowance.lt(amt) }));
+        } catch { /* ignore */ }
+      } else {
+        setState(s => ({ ...s, needsApprovalB: false }));
       }
     };
-
     check();
-  }, [state.amountA, state.amountB, state.tokenA, state.tokenB, signer, address, normalizeToken, getErc20Meta]);
+  }, [state.amountA, state.amountB, state.tokenA, state.tokenB, signer, address]);
 
-  // Check LP approval
   useEffect(() => {
     const check = async () => {
-      if (!signer || !address || !state.poolInfo) return;
-      if (!isPositiveNumberString(state.lpToRemove)) return;
-
+      if (!signer || !address || !state.poolInfo || !state.lpToRemove) return;
       try {
         const pair = new ethers.Contract(state.poolInfo.pairAddress, PAIR_ABI, signer);
         const amt = ethers.utils.parseEther(state.lpToRemove);
         const allowance: ethers.BigNumber = await pair.allowance(address, ROUTER_ADDRESS);
-        setState((s) => ({ ...s, needsLpApproval: allowance.lt(amt) }));
-      } catch {
-        /* ignore */
-      }
+        setState(s => ({ ...s, needsLpApproval: allowance.lt(amt) }));
+      } catch { /* ignore */ }
     };
-
     check();
   }, [state.lpToRemove, state.poolInfo, signer, address]);
 
-  const setTokenA = useCallback(
-    (t: Token) => {
-      const nt = normalizeToken(t);
-      setState((s) => ({ ...s, tokenA: nt, amountA: "", amountB: "", error: null, txHash: null }));
-    },
-    [normalizeToken]
-  );
+  const setTokenA = useCallback((t: Token) => {
+    setState(s => ({ ...s, tokenA: t, amountA: "", amountB: "", error: null, txHash: null }));
+  }, []);
 
-  const setTokenB = useCallback(
-    (t: Token) => {
-      const nt = normalizeToken(t);
-      setState((s) => ({ ...s, tokenB: nt, amountA: "", amountB: "", error: null, txHash: null }));
-    },
-    [normalizeToken]
-  );
+  const setTokenB = useCallback((t: Token) => {
+    setState(s => ({ ...s, tokenB: t, amountA: "", amountB: "", error: null, txHash: null }));
+  }, []);
 
   const setAmountA = useCallback((v: string) => {
-    setState((s) => ({ ...s, amountA: v, error: null }));
+    setState(s => ({ ...s, amountA: v, error: null }));
   }, []);
 
   const setAmountB = useCallback((v: string) => {
-    setState((s) => ({ ...s, amountB: v, error: null }));
+    setState(s => ({ ...s, amountB: v, error: null }));
   }, []);
 
   const setLpToRemove = useCallback((v: string) => {
-    setState((s) => ({ ...s, lpToRemove: v, error: null }));
+    setState(s => ({ ...s, lpToRemove: v, error: null }));
   }, []);
 
   const approveA = useCallback(async () => {
-    if (!signer) return;
-    setState((s) => ({ ...s, isApproving: true, error: null }));
+    if (!signer || state.tokenA.address === "NATIVE") return;
+    setState(s => ({ ...s, isApproving: true, error: null }));
     try {
-      const tA = normalizeToken(state.tokenA);
-      const c = new ethers.Contract(tA.address, ERC20_ABI, signer);
-      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256);
+      const c = new ethers.Contract(state.tokenA.address, ERC20_ABI, signer);
+      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
       await tx.wait();
-      setState((s) => ({ ...s, isApproving: false, needsApprovalA: false }));
+      setState(s => ({ ...s, isApproving: false, needsApprovalA: false }));
     } catch (e: any) {
-      setState((s) => ({
-        ...s,
-        isApproving: false,
-        error: extractRevertReason(e) || "Approval failed",
-      }));
+      setState(s => ({ ...s, isApproving: false, error: e?.reason || e?.message || "Approval failed" }));
     }
-  }, [signer, state.tokenA, normalizeToken]);
+  }, [signer, state.tokenA]);
 
   const approveB = useCallback(async () => {
-    if (!signer) return;
-    setState((s) => ({ ...s, isApproving: true, error: null }));
+    if (!signer || state.tokenB.address === "NATIVE") return;
+    setState(s => ({ ...s, isApproving: true, error: null }));
     try {
-      const tB = normalizeToken(state.tokenB);
-      const c = new ethers.Contract(tB.address, ERC20_ABI, signer);
-      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256);
+      const c = new ethers.Contract(state.tokenB.address, ERC20_ABI, signer);
+      const tx = await c.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
       await tx.wait();
-      setState((s) => ({ ...s, isApproving: false, needsApprovalB: false }));
+      setState(s => ({ ...s, isApproving: false, needsApprovalB: false }));
     } catch (e: any) {
-      setState((s) => ({
-        ...s,
-        isApproving: false,
-        error: extractRevertReason(e) || "Approval failed",
-      }));
+      setState(s => ({ ...s, isApproving: false, error: e?.reason || e?.message || "Approval failed" }));
     }
-  }, [signer, state.tokenB, normalizeToken]);
+  }, [signer, state.tokenB]);
 
   const approveLp = useCallback(async () => {
     if (!signer || !state.poolInfo) return;
-    setState((s) => ({ ...s, isApproving: true, error: null }));
+    setState(s => ({ ...s, isApproving: true, error: null }));
     try {
       const pair = new ethers.Contract(state.poolInfo.pairAddress, PAIR_ABI, signer);
-      const tx = await pair.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256);
+      const tx = await pair.approve(ROUTER_ADDRESS, ethers.constants.MaxUint256, { gasPrice: GAS_PRICE });
       await tx.wait();
-      setState((s) => ({ ...s, isApproving: false, needsLpApproval: false }));
+      setState(s => ({ ...s, isApproving: false, needsLpApproval: false }));
     } catch (e: any) {
-      setState((s) => ({
-        ...s,
-        isApproving: false,
-        error: extractRevertReason(e) || "Approval failed",
-      }));
+      setState(s => ({ ...s, isApproving: false, error: e?.reason || e?.message || "Approval failed" }));
     }
   }, [signer, state.poolInfo]);
 
   const addLiquidity = useCallback(async () => {
-    if (!signer || !address) return;
-    if (!isPositiveNumberString(state.amountA) || !isPositiveNumberString(state.amountB)) return;
-
-    setState((s) => ({ ...s, isAdding: true, error: null, txHash: null }));
-
+    if (!signer || !address || !state.amountA || !state.amountB) return;
+    setState(s => ({ ...s, isAdding: true, error: null, txHash: null }));
     try {
       const router = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, signer);
+      const dl = deadline();
+      const isNativeA = state.tokenA.address === "NATIVE";
+      const isNativeB = state.tokenB.address === "NATIVE";
+      const emptyPool = isPoolEmpty(state.poolInfo);
+      let tx;
 
-      const tA = normalizeToken(state.tokenA);
-      const tB = normalizeToken(state.tokenB);
-
-      const metaA = await getErc20Meta(tA.address);
-      const metaB = await getErc20Meta(tB.address);
-
-      const amtA = ethers.utils.parseUnits(state.amountA, metaA.decimals);
-      const amtB = ethers.utils.parseUnits(state.amountB, metaB.decimals);
-
-      const amtAMin = applySlippageDown(amtA, SLIPPAGE_BPS);
-      const amtBMin = applySlippageDown(amtB, SLIPPAGE_BPS);
-
-      const dl = await getChainDeadline();
-
-      // Preflight
-      try {
-        await router.callStatic.addLiquidity(
-          tA.address,
-          tB.address,
-          amtA,
-          amtB,
-          amtAMin,
-          amtBMin,
-          address,
-          dl
+      if (isNativeA) {
+        const amtToken = ethers.utils.parseUnits(state.amountB, state.tokenB.decimals);
+        const amtETH = ethers.utils.parseEther(state.amountA);
+        // On empty pool, set mins to 0 to allow free price setting
+        const amtTokenMin = emptyPool ? ethers.BigNumber.from(0) : amtToken.mul(10000 - SLIPPAGE_BPS).div(10000);
+        const amtETHMin = emptyPool ? ethers.BigNumber.from(0) : amtETH.mul(10000 - SLIPPAGE_BPS).div(10000);
+        tx = await router.addLiquidityETH(
+          state.tokenB.address, amtToken, amtTokenMin, amtETHMin, address, dl,
+          { value: amtETH, gasPrice: GAS_PRICE }
         );
-      } catch (simErr: any) {
-        throw new Error(extractRevertReason(simErr) || "addLiquidity reverted");
+      } else if (isNativeB) {
+        const amtToken = ethers.utils.parseUnits(state.amountA, state.tokenA.decimals);
+        const amtETH = ethers.utils.parseEther(state.amountB);
+        const amtTokenMin = emptyPool ? ethers.BigNumber.from(0) : amtToken.mul(10000 - SLIPPAGE_BPS).div(10000);
+        const amtETHMin = emptyPool ? ethers.BigNumber.from(0) : amtETH.mul(10000 - SLIPPAGE_BPS).div(10000);
+        tx = await router.addLiquidityETH(
+          state.tokenA.address, amtToken, amtTokenMin, amtETHMin, address, dl,
+          { value: amtETH, gasPrice: GAS_PRICE }
+        );
+      } else {
+        const amtA = ethers.utils.parseUnits(state.amountA, state.tokenA.decimals);
+        const amtB = ethers.utils.parseUnits(state.amountB, state.tokenB.decimals);
+        const amtAMin = emptyPool ? ethers.BigNumber.from(0) : amtA.mul(10000 - SLIPPAGE_BPS).div(10000);
+        const amtBMin = emptyPool ? ethers.BigNumber.from(0) : amtB.mul(10000 - SLIPPAGE_BPS).div(10000);
+        tx = await router.addLiquidity(
+          state.tokenA.address, state.tokenB.address,
+          amtA, amtB, amtAMin, amtBMin, address, dl,
+          { gasPrice: GAS_PRICE }
+        );
       }
 
-      const tx = await router.addLiquidity(
-        tA.address,
-        tB.address,
-        amtA,
-        amtB,
-        amtAMin,
-        amtBMin,
-        address,
-        dl
-      );
-
       const receipt = await tx.wait();
-
-      setState((s) => ({
-        ...s,
-        isAdding: false,
+      setState(s => ({
+        ...s, isAdding: false,
         txHash: receipt.transactionHash,
-        amountA: "",
-        amountB: "",
+        amountA: "", amountB: "",
       }));
     } catch (e: any) {
-      const msg = extractRevertReason(e) || "Add liquidity failed";
-      setState((s) => ({ ...s, isAdding: false, error: msg }));
+      setState(s => ({ ...s, isAdding: false, error: e?.reason || e?.message || "Add liquidity failed" }));
     }
-  }, [signer, address, state.amountA, state.amountB, state.tokenA, state.tokenB, normalizeToken, getErc20Meta, getChainDeadline]);
+  }, [signer, address, state]);
 
   const removeLiquidity = useCallback(async () => {
-    if (!signer || !address || !state.poolInfo) return;
-    if (!isPositiveNumberString(state.lpToRemove)) return;
-
-    setState((s) => ({ ...s, isRemoving: true, error: null, txHash: null }));
-
+    if (!signer || !address || !state.lpToRemove || !state.poolInfo) return;
+    setState(s => ({ ...s, isRemoving: true, error: null, txHash: null }));
     try {
       const router = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, signer);
-      const dl = await getChainDeadline();
-
-      const tA = normalizeToken(state.tokenA);
-      const tB = normalizeToken(state.tokenB);
-
-      const metaA = await getErc20Meta(tA.address);
-      const metaB = await getErc20Meta(tB.address);
-
+      const dl = deadline();
       const lpAmt = ethers.utils.parseEther(state.lpToRemove);
+      const isNativeA = state.tokenA.address === "NATIVE";
+      const isNativeB = state.tokenB.address === "NATIVE";
 
-      const amtAMin = ethers.utils.parseUnits(
-        (parseFloat(state.removeAmountA) * 0.995).toFixed(metaA.decimals),
-        metaA.decimals
-      );
-      const amtBMin = ethers.utils.parseUnits(
-        (parseFloat(state.removeAmountB) * 0.995).toFixed(metaB.decimals),
-        metaB.decimals
-      );
+      // Use BigNumber math for min amounts — avoids float rounding reverts
+      const pair = new ethers.Contract(state.poolInfo.pairAddress, PAIR_ABI, signer);
+      const [res0, res1] = await pair.getReserves();
+      const totalSupply: ethers.BigNumber = await pair.totalSupply();
+      const token0: string = await pair.token0();
+      const addrA = getTokenAddr(state.tokenA);
+      const isAFirst = addrA.toLowerCase() === token0.toLowerCase();
+      const resA = isAFirst ? res0 : res1;
+      const resB = isAFirst ? res1 : res0;
+      const expectedA = lpAmt.mul(resA).div(totalSupply);
+      const expectedB = lpAmt.mul(resB).div(totalSupply);
+      const minA = expectedA.mul(10000 - SLIPPAGE_BPS).div(10000);
+      const minB = expectedB.mul(10000 - SLIPPAGE_BPS).div(10000);
 
-      // Preflight
-      try {
-        await router.callStatic.removeLiquidity(
-          tA.address,
-          tB.address,
-          lpAmt,
-          amtAMin,
-          amtBMin,
-          address,
-          dl
+      let tx;
+
+      if (isNativeA || isNativeB) {
+        const tokenAddr = isNativeA ? state.tokenB.address : state.tokenA.address;
+        const minToken = isNativeA ? minB : minA;
+        tx = await router.removeLiquidityETH(
+          tokenAddr, lpAmt, minToken, 0, address, dl,
+          { gasPrice: GAS_PRICE }
         );
-      } catch (simErr: any) {
-        throw new Error(extractRevertReason(simErr) || "removeLiquidity reverted");
+      } else {
+        tx = await router.removeLiquidity(
+          state.tokenA.address, state.tokenB.address,
+          lpAmt, minA, minB, address, dl,
+          { gasPrice: GAS_PRICE }
+        );
       }
 
-      const tx = await router.removeLiquidity(
-        tA.address,
-        tB.address,
-        lpAmt,
-        amtAMin,
-        amtBMin,
-        address,
-        dl
-      );
-
       const receipt = await tx.wait();
-
-      setState((s) => ({
-        ...s,
-        isRemoving: false,
+      setState(s => ({
+        ...s, isRemoving: false,
         txHash: receipt.transactionHash,
-        lpToRemove: "",
-        removeAmountA: "",
-        removeAmountB: "",
+        lpToRemove: "", removeAmountA: "", removeAmountB: "",
       }));
     } catch (e: any) {
-      setState((s) => ({
-        ...s,
-        isRemoving: false,
-        error: extractRevertReason(e) || "Remove liquidity failed",
-      }));
+      setState(s => ({ ...s, isRemoving: false, error: e?.reason || e?.message || "Remove liquidity failed" }));
     }
-  }, [
-    signer,
-    address,
-    state.poolInfo,
-    state.lpToRemove,
-    state.removeAmountA,
-    state.removeAmountB,
-    state.tokenA,
-    state.tokenB,
-    normalizeToken,
-    getChainDeadline,
-    getErc20Meta,
-  ]);
+  }, [signer, address, state]);
 
   return {
     ...state,
-    setTokenA,
-    setTokenB,
-    setAmountA,
-    setAmountB,
-    setLpToRemove,
-    approveA,
-    approveB,
-    approveLp,
-    addLiquidity,
-    removeLiquidity,
+    setTokenA, setTokenB, setAmountA, setAmountB, setLpToRemove,
+    approveA, approveB, approveLp,
+    addLiquidity, removeLiquidity,
   };
 }
