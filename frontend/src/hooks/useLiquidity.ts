@@ -8,6 +8,7 @@ import {
   NATIVE_TOKEN,
 } from "../config/contracts";
 import { ROUTER_ABI, FACTORY_ABI, PAIR_ABI, ERC20_ABI } from "../config/abis";
+import { ZERO_ADDRESS } from "../config/constants";
 
 const SLIPPAGE_BPS = 50; // 0.50%
 const DEADLINE_MINUTES = 30;
@@ -146,7 +147,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
   // Fetch pool info (ERC20 / ERC20 only)
   useEffect(() => {
     const fetchPool = async () => {
-      if (!signer || FACTORY_ADDRESS === "0x0000000000000000000000000000000000000000") return;
+      if (!signer || (FACTORY_ADDRESS as string) === ZERO_ADDRESS) return;
 
       setState((s) => ({ ...s, isLoadingPool: true }));
 

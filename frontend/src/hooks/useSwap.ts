@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { ethers } from "ethers";
 import { Token, TOKENS, ROUTER_ADDRESS, NATIVE_TOKEN } from "../config/contracts";
 import { ROUTER_ABI, ERC20_ABI } from "../config/abis";
+import { ZERO_ADDRESS } from "../config/constants";
 
 const SLIPPAGE_BPS = 50; // 0.50%
 const DEADLINE_MINUTES = 30;
@@ -154,7 +155,7 @@ export function useSwap(signer: ethers.Signer | null, address: string | null) {
         setState((s) => ({ ...s, amountOut: "" }));
         return;
       }
-      if (ROUTER_ADDRESS === "0x0000000000000000000000000000000000000000") {
+      if ((ROUTER_ADDRESS as string) === ZERO_ADDRESS) {
         setState((s) => ({
           ...s,
           error: "Router not deployed yet. Update ROUTER_ADDRESS in config/contracts.ts",
