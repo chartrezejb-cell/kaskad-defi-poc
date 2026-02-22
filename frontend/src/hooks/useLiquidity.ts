@@ -72,7 +72,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     t.address === "NATIVE" ? TOKENS.kaWIKAS.address : t.address;
 
   const isPoolEmpty = (poolInfo: PoolInfo | null) =>
-    !poolInfo || parseFloat(poolInfo.totalSupply) === 0;
+  !poolInfo || ethers.utils.parseEther(poolInfo.totalSupply).eq(0);
 
   useEffect(() => {
     const fetchPool = async () => {
