@@ -7,9 +7,11 @@ const DEADLINE_MINUTES = 20;
 const SLIPPAGE_BPS = 50;
 const GAS_PRICE = ethers.utils.parseUnits("2000", "gwei");
 const GAS_LIMIT = 500000;
+const MINIMUM_LIQUIDITY = ethers.BigNumber.from(1000);
 
-function deadline() {
-  return Math.floor(Date.now() / 1000) + DEADLINE_MINUTES * 60;
+async function getDeadline(signer: ethers.Signer): Promise<number> {
+  const block = await signer.provider!.getBlock("latest");
+  return block.timestamp + DEADLINE_MINUTES * 60;
 }
 
 export type PoolInfo = {
@@ -72,7 +74,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     t.address === "NATIVE" ? TOKENS.kaWIKAS.address : t.address;
 
   const isPoolEmpty = (poolInfo: PoolInfo | null) =>
-  !poolInfo || ethers.utils.parseEther(poolInfo.totalSupply).lte(ethers.BigNumber.from(1000));
+    !poolInfo || ethers.utils.parseEther(poolInfo.totalSupply).lte(MINIMUM_LIQUIDITY);
 
   useEffect(() => {
     const fetchPool = async () => {
@@ -138,7 +140,8 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
   useEffect(() => {
     if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
     const { reserve0, reserve1, totalSupply } = state.poolInfo;
-    if (parseFloat(totalSupply) === 0 || parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
+    if (ethers.utils.parseEther(totalSupply).lte(MINIMUM_LIQUIDITY)) return;
+    if (parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
     const ratio = parseFloat(reserve1) / parseFloat(reserve0);
     setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
   }, [state.amountA, state.pairExists, state.poolInfo]);
@@ -258,7 +261,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     setState(s => ({ ...s, isAdding: true, error: null, txHash: null }));
     try {
       const router = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, signer);
-      const dl = deadline();
+      const dl = await getDeadline(signer);
       const isNativeA = state.tokenA.address === "NATIVE";
       const isNativeB = state.tokenB.address === "NATIVE";
       const emptyPool = isPoolEmpty(state.poolInfo);
@@ -310,7 +313,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     setState(s => ({ ...s, isRemoving: true, error: null, txHash: null }));
     try {
       const router = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, signer);
-      const dl = deadline();
+      const dl = await getDeadline(signer);
       const lpAmt = ethers.utils.parseEther(state.lpToRemove);
       const isNativeA = state.tokenA.address === "NATIVE";
       const isNativeB = state.tokenB.address === "NATIVE";
