@@ -133,15 +133,15 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
     fetchPool();
   }, [state.tokenA, state.tokenB, signer, address]);
 
-  // Auto-calculate tokenB based on pool ratio — skip if pool is empty
-  useEffect(() => {
-    if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
-    const { reserve0, reserve1 } = state.poolInfo;
-    // Don't auto-calculate on empty pool — let user set initial price freely
-    if (parseFloat(reserve0) === 0 || parseFloat(reserve1) === 0) return;
-    const ratio = parseFloat(reserve1) / parseFloat(reserve0);
-    setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
-  }, [state.amountA, state.pairExists, state.poolInfo]);
+ // Auto-calculate tokenB based on pool ratio — skip if pool is empty
+useEffect(() => {
+  if (!state.pairExists || !state.poolInfo || !state.amountA || parseFloat(state.amountA) <= 0) return;
+  const { reserve0, reserve1, totalSupply } = state.poolInfo;
+  // Use totalSupply as the reliable signal — if no LP exists, price is unset
+  if (parseFloat(totalSupply) === 0) return;
+  const ratio = parseFloat(reserve1) / parseFloat(reserve0);
+  setState(s => ({ ...s, amountB: (parseFloat(s.amountA) * ratio).toFixed(6) }));
+}, [state.amountA, state.pairExists, state.poolInfo]);
 
   useEffect(() => {
     if (!state.poolInfo || !state.lpToRemove || parseFloat(state.lpToRemove) <= 0) return;
