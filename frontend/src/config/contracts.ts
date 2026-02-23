@@ -29,11 +29,11 @@ export const TOKENS: Record<string, Token> = {
     isNative: true, // auto-wrap iKAS -> kaWIKAS
   },
   kaUSDC: {
-    address: "0x1f934cc104685147b953b15357ad5e2475f5BfCF",
-    symbol: "kaUSDC",
-    name: "Kaskad USDC",
-    decimals: 6,
-  },
+  address: "0x700b6A60ce7EaaEA56F065753d8dcB9653dbAD35",
+  symbol: "USDC",
+  name: "USD Coin",
+  decimals: 6,
+},
   KSKD: {
     address: "0x61D641D4f86d3977959ceFe15ABA47B39d3e5025",
     symbol: "KSKD",
