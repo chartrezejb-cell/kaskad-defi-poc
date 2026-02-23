@@ -159,7 +159,7 @@ export function useLiquidity(signer: ethers.Signer | null, address: string | nul
 
   useEffect(() => {
     const check = async () => {
-      if (!signer || !address || !state.amountA || !state.amountB) return;
+      if (!signer || !address || !state.amountA) return;
       if (state.tokenA.address !== "NATIVE") {
         try {
           const c = new ethers.Contract(state.tokenA.address, ERC20_ABI, signer);
